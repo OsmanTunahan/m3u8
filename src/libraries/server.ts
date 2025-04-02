@@ -554,42 +554,50 @@ function createRateLimitChecker(CORSANYWHERE_RATELIMIT) {
  * @param res Server response object
  */
 export async function proxyM3U8(url: string, headers: any, res: http.ServerResponse) {
+    // Define browser-like headers
+    const browserHeaders = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "application/vnd.apple.mpegurl,application/x-mpegURL,text/plain,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.5",
+        "Accept-Encoding": "gzip, deflate, br",
+        "Connection": "keep-alive",
+        "Referer": new URL(url).origin,
+        ...headers,
+    };
+
     const req = await axios(url, {
-        headers: headers,
+        headers: browserHeaders,
+        responseType: "text", // Ensure we get the raw M3U8 text
     }).catch((err) => {
         res.writeHead(500);
-        res.end(err.message);
+        res.end(`Failed to fetch M3U8: ${err.message}`);
         return null;
     });
-    if (!req) {
-        return;
-    }
+
+    if (!req) return;
 
     const m3u8 = req.data;
-    const baseUrl = new URL(url).origin + new URL(url).pathname.split("/").slice(0, -1).join("/"); // Ana URL'nin temel kısmı
+    const baseUrl = new URL(url).origin + new URL(url).pathname.split("/").slice(0, -1).join("/");
     const lines = m3u8.split("\n");
-    const newLines: string[] = [];
+    const newLines = [];
 
     for (const line of lines) {
         if (line.startsWith("#")) {
-            // EXT-X-KEY satırlarını işle
             if (line.startsWith("#EXT-X-KEY:")) {
                 const regex = /https?:\/\/[^\""\s]+/g;
                 const keyUrl = regex.exec(line)?.[0];
                 if (keyUrl) {
-                    const proxyKeyUrl = `${web_server_url}/ts-proxy?url=${encodeURIComponent(keyUrl)}&headers=${encodeURIComponent(JSON.stringify(headers))}`;
+                    const proxyKeyUrl = `${web_server_url}/ts-proxy?url=${encodeURIComponent(keyUrl)}&headers=${encodeURIComponent(JSON.stringify(browserHeaders))}`;
                     newLines.push(line.replace(regex, proxyKeyUrl));
                 } else {
                     newLines.push(line);
                 }
-            }
-            // EXT-X-I-FRAME-STREAM-INF satırlarını işle
-            else if (line.startsWith("#EXT-X-I-FRAME-STREAM-INF:")) {
+            } else if (line.startsWith("#EXT-X-I-FRAME-STREAM-INF:")) {
                 const uriMatch = line.match(/URI="([^"]+)"/);
                 if (uriMatch) {
                     const uri = uriMatch[1];
                     const fullUri = uri.startsWith("http") ? uri : `${baseUrl}/${uri}`;
-                    const proxyUri = `${web_server_url}/m3u8-proxy?url=${encodeURIComponent(fullUri)}&headers=${encodeURIComponent(JSON.stringify(headers))}`;
+                    const proxyUri = `${web_server_url}/m3u8-proxy?url=${encodeURIComponent(fullUri)}&headers=${encodeURIComponent(JSON.stringify(browserHeaders))}`;
                     newLines.push(line.replace(uri, proxyUri));
                 } else {
                     newLines.push(line);
@@ -598,27 +606,22 @@ export async function proxyM3U8(url: string, headers: any, res: http.ServerRespo
                 newLines.push(line);
             }
         } else if (line.trim()) {
-            // Normal satırları (örneğin .ts dosyaları veya diğer m3u8 dosyaları) işle
             const uri = new URL(line, url).href;
             if (uri.endsWith(".m3u8")) {
-                newLines.push(`${web_server_url}/m3u8-proxy?url=${encodeURIComponent(uri)}&headers=${encodeURIComponent(JSON.stringify(headers))}`);
+                newLines.push(`${web_server_url}/m3u8-proxy?url=${encodeURIComponent(uri)}&headers=${encodeURIComponent(JSON.stringify(browserHeaders))}`);
             } else {
-                newLines.push(`${web_server_url}/ts-proxy?url=${encodeURIComponent(uri)}&headers=${encodeURIComponent(JSON.stringify(headers))}`);
+                newLines.push(`${web_server_url}/ts-proxy?url=${encodeURIComponent(uri)}&headers=${encodeURIComponent(JSON.stringify(browserHeaders))}`);
             }
         } else {
             newLines.push(line);
         }
     }
 
-    // Gereksiz header'ları kaldır
-    ["Access-Control-Allow-Origin", "Access-Control-Allow-Methods", "Access-Control-Allow-Headers", "Access-Control-Max-Age", "Access-Control-Allow-Credentials", "Access-Control-Expose-Headers", "Access-Control-Request-Method", "Access-Control-Request-Headers", "Origin", "Vary", "Referer", "Server", "x-cache", "via", "x-amz-cf-pop", "x-amz-cf-id"].map((header) => res.removeHeader(header));
-
-    // Gerekli header'ları ekle
+    // Set response headers
     res.setHeader("Content-Type", "application/vnd.apple.mpegurl");
     res.setHeader("Access-Control-Allow-Origin", "*");
     res.setHeader("Access-Control-Allow-Headers", "*");
     res.setHeader("Access-Control-Allow-Methods", "*");
-
     res.end(newLines.join("\n"));
 }
 
@@ -629,62 +632,57 @@ export async function proxyM3U8(url: string, headers: any, res: http.ServerRespo
  * @param res Server response object
  */
 export async function proxyTs(url: string, headers: any, req, res: http.ServerResponse) {
-    // I love how NodeJS HTTP request client only takes http URLs :D It's so fun!
-    // I'll probably refactor this later.
-
-    let forceHTTPS = false;
-
-    if (url.startsWith("https://")) {
-        forceHTTPS = true;
-    }
-
     const uri = new URL(url);
+    const isHttps = url.startsWith("https://");
 
-    // Options
-    // It might be worth adding ...req.headers to the headers object, but once I did that
-    // the code broke and I receive errors such as "Cannot access direct IP" or whatever.
-    const options = {
-        hostname: uri.hostname,
-        port: uri.port,
-        path: uri.pathname + uri.search,
-        method: req.method,
-        headers: {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/80.0.3987.132 Safari/537.36",
-            ...headers,
-        },
+    // Define a realistic set of browser-like headers
+    const browserHeaders = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "video/webm,video/ogg,video/*;q=0.9,application/ogg;q=0.7,audio/*;q=0.6,*/*;q=0.5",
+        "Accept-Language": "en-US,en;q=0.5",
+        "Accept-Encoding": "gzip, deflate, br",
+        "Connection": "keep-alive",
+        "Referer": uri.origin, // Mimic a referer from the same origin
+        ...headers, // Merge with user-provided headers
     };
 
-    // Proxy request and pipe to client
+    const options = {
+        hostname: uri.hostname,
+        port: uri.port || (isHttps ? 443 : 80),
+        path: uri.pathname + uri.search,
+        method: req.method,
+        headers: browserHeaders,
+    };
+
     try {
-        if (forceHTTPS) {
-            const proxy = https.request(options, (r) => {
-                r.headers["content-type"] = "video/mp2t";
-                res.writeHead(r.statusCode ?? 200, r.headers);
+        const proxy = isHttps
+            ? https.request(options, (r) => {
+                  r.headers["content-type"] = "video/mp2t";
+                  res.writeHead(r.statusCode ?? 200, {
+                      ...r.headers,
+                      "Access-Control-Allow-Origin": "*", // Keep CORS headers
+                  });
+                  r.pipe(res, { end: true });
+              })
+            : http.request(options, (r) => {
+                  r.headers["content-type"] = "video/mp2t";
+                  res.writeHead(r.statusCode ?? 200, {
+                      ...r.headers,
+                      "Access-Control-Allow-Origin": "*",
+                  });
+                  r.pipe(res, { end: true });
+              });
 
-                r.pipe(res, {
-                    end: true,
-                });
-            });
+        // Handle errors
+        proxy.on("error", (e) => {
+            res.writeHead(500);
+            res.end(`Proxy error: ${e.message}`);
+        });
 
-            req.pipe(proxy, {
-                end: true,
-            });
-        } else {
-            const proxy = http.request(options, (r) => {
-                r.headers["content-type"] = "video/mp2t";
-                res.writeHead(r.statusCode ?? 200, r.headers);
-
-                r.pipe(res, {
-                    end: true,
-                });
-            });
-            req.pipe(proxy, {
-                end: true,
-            });
-        }
-    } catch (e: any) {
+        // Pipe the client request to the proxy
+        req.pipe(proxy, { end: true });
+    } catch (e) {
         res.writeHead(500);
-        res.end(e.message);
-        return null;
+        res.end(`Request failed: ${e.message}`);
     }
 }
