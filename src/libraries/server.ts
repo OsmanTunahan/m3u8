@@ -1,9 +1,3 @@
-/**
- * @author Eltik. Credit to CORS proxy by Rob Wu.
- * @description Proxies m3u8 files.
- * @license MIT
- */
-
 import dotenv from "dotenv";
 dotenv.config();
 
@@ -17,6 +11,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import colors from "colors";
 import axios from "axios";
+import randomUserAgent from "random-useragent";
 
 function withCORS(headers, request) {
     headers["access-control-allow-origin"] = "*";
@@ -554,9 +549,15 @@ function createRateLimitChecker(CORSANYWHERE_RATELIMIT) {
  * @param res Server response object
  */
 export async function proxyM3U8(url: string, headers: any, res: http.ServerResponse) {
-    // Define browser-like headers
+    // Generate a random User-Agent for each request
+    const userAgent = randomUserAgent.getRandom((ua) => {
+        // Filter for modern browser User-Agents (e.g., Chrome, Firefox, Safari)
+        return ua.browserName === "Chrome" || ua.browserName === "Firefox" || ua.browserName === "Safari";
+    }) || "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
+
+    // Define browser-like headers with random User-Agent
     const browserHeaders = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "User-Agent": userAgent,
         "Accept": "application/vnd.apple.mpegurl,application/x-mpegURL,text/plain,*/*;q=0.8",
         "Accept-Language": "en-US,en;q=0.5",
         "Accept-Encoding": "gzip, deflate, br",
@@ -567,9 +568,9 @@ export async function proxyM3U8(url: string, headers: any, res: http.ServerRespo
 
     const req = await axios(url, {
         headers: browserHeaders,
-        responseType: "text", // Ensure we get the raw M3U8 text
+        responseType: "text",
     }).catch((err) => {
-        res.writeHead(500);
+        res.writeHead(err.response?.status || 500);
         res.end(`Failed to fetch M3U8: ${err.message}`);
         return null;
     });
@@ -617,7 +618,6 @@ export async function proxyM3U8(url: string, headers: any, res: http.ServerRespo
         }
     }
 
-    // Set response headers
     res.setHeader("Content-Type", "application/vnd.apple.mpegurl");
     res.setHeader("Access-Control-Allow-Origin", "*");
     res.setHeader("Access-Control-Allow-Headers", "*");
