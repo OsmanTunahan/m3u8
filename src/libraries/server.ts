@@ -12,6 +12,7 @@ import { join } from "node:path";
 import colors from "colors";
 import axios from "axios";
 import randomUserAgent from "random-useragent";
+const cookieStore = new Map();
 
 function withCORS(headers, request) {
     headers["access-control-allow-origin"] = "*";
@@ -549,20 +550,16 @@ function createRateLimitChecker(CORSANYWHERE_RATELIMIT) {
  * @param res Server response object
  */
 export async function proxyM3U8(url: string, headers: any, res: http.ServerResponse) {
-    // Generate a random User-Agent for each request
-    const userAgent = randomUserAgent.getRandom((ua) => {
-        // Filter for modern browser User-Agents (e.g., Chrome, Firefox, Safari)
-        return ua.browserName === "Chrome" || ua.browserName === "Firefox" || ua.browserName === "Safari";
-    }) || "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
-
-    // Define browser-like headers with random User-Agent
     const browserHeaders = {
-        "User-Agent": userAgent,
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         "Accept": "application/vnd.apple.mpegurl,application/x-mpegURL,text/plain,*/*;q=0.8",
         "Accept-Language": "en-US,en;q=0.5",
         "Accept-Encoding": "gzip, deflate, br",
         "Connection": "keep-alive",
-        "Referer": new URL(url).origin,
+        "Referer": new URL(url).origin + "/",
+        "Cookie": cookieStore.get(new URL(url).hostname) || "",
+        "DNT": "1",
+        "Upgrade-Insecure-Requests": "1",
         ...headers,
     };
 
@@ -570,13 +567,22 @@ export async function proxyM3U8(url: string, headers: any, res: http.ServerRespo
         headers: browserHeaders,
         responseType: "text",
     }).catch((err) => {
-        res.writeHead(err.response?.status || 500);
-        res.end(`Failed to fetch M3U8: ${err.message}`);
+        console.error("M3U8 isteği hatası:", err.message);
+        res.writeHead(500);
+        res.end(`M3U8 alınamadı: ${err.message}`);
         return null;
     });
 
     if (!req) return;
 
+    // Çerezleri sakla
+    const cookies = req.headers["set-cookie"];
+    if (cookies) {
+        cookieStore.set(new URL(url).hostname, cookies.join("; "));
+        console.log("M3U8 çerezleri kaydedildi:", cookies);
+    }
+
+    // Geri kalan kod aynı kalabilir, sadece browserHeaders'ı proxy URL'lerine geçir
     const m3u8 = req.data;
     const baseUrl = new URL(url).origin + new URL(url).pathname.split("/").slice(0, -1).join("/");
     const lines = m3u8.split("\n");
@@ -635,20 +641,26 @@ export async function proxyTs(url: string, headers: any, req, res: http.ServerRe
     const uri = new URL(url);
     const isHttps = url.startsWith("https://");
 
-    // Generate a random User-Agent
-    const userAgent = randomUserAgent.getRandom((ua) => {
-        return ua.browserName === "Chrome" || ua.browserName === "Firefox" || ua.browserName === "Safari";
-    }) || "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
-
+    // Gerçek bir tarayıcı gibi görünen başlıklar
     const browserHeaders = {
-        "User-Agent": userAgent,
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         "Accept": "video/webm,video/ogg,video/*;q=0.9,application/ogg;q=0.7,audio/*;q=0.6,*/*;q=0.5",
         "Accept-Language": "en-US,en;q=0.5",
         "Accept-Encoding": "gzip, deflate, br",
         "Connection": "keep-alive",
-        "Referer": uri.origin,
-        ...headers,
+        "Referer": uri.origin + "/", // Daha doğal bir referer
+        "Cookie": cookieStore.get(uri.hostname) || "", // Önceki çerezleri ekle
+        "DNT": "1", // "Do Not Track" başlığı ekleyerek insan gibi görünebilir
+        "Upgrade-Insecure-Requests": "1", // Tarayıcıların kullandığı bir başlık
+        ...headers, // Kullanıcıdan gelen başlıkları ekle
     };
+
+    // HTTPS isteği için özel bir agent tanımla (TLS parmak izini iyileştirmek için)
+    const httpsAgent = new https.Agent({
+        keepAlive: true,
+        rejectUnauthorized: false, // Geliştirme için, üretimde dikkatli olun
+        minVersion: "TLSv1.2", // Cloudflare genelde TLS 1.2+ bekler
+    });
 
     const options = {
         hostname: uri.hostname,
@@ -656,35 +668,144 @@ export async function proxyTs(url: string, headers: any, req, res: http.ServerRe
         path: uri.pathname + uri.search,
         method: req.method,
         headers: browserHeaders,
+        agent: isHttps ? httpsAgent : false, // HTTPS için özel agent
     };
 
     try {
         const proxy = isHttps
             ? https.request(options, (r) => {
-                  r.headers["content-type"] = "video/mp2t";
-                  res.writeHead(r.statusCode ?? 200, {
+                  // Çerezleri sakla
+                  const cookies = r.headers["set-cookie"];
+                  if (cookies) {
+                      cookieStore.set(uri.hostname, cookies.join("; "));
+                      console.log("Çerezler kaydedildi:", cookies);
+                  }
+
+                  // Yanıt başlıklarını ayarla
+                  const responseHeaders = {
                       ...r.headers,
+                      "content-type": "video/mp2t",
                       "Access-Control-Allow-Origin": "*",
-                  });
+                  };
+                  res.writeHead(r.statusCode ?? 200, responseHeaders);
                   r.pipe(res, { end: true });
               })
             : http.request(options, (r) => {
-                  r.headers["content-type"] = "video/mp2t";
-                  res.writeHead(r.statusCode ?? 200, {
+                  const cookies = r.headers["set-cookie"];
+                  if (cookies) {
+                      cookieStore.set(uri.hostname, cookies.join("; "));
+                      console.log("Çerezler kaydedildi:", cookies);
+                  }
+                  const responseHeaders = {
                       ...r.headers,
+                      "content-type": "video/mp2t",
                       "Access-Control-Allow-Origin": "*",
-                  });
+                  };
+                  res.writeHead(r.statusCode ?? 200, responseHeaders);
                   r.pipe(res, { end: true });
               });
 
+        // Hata yakalama
         proxy.on("error", (e) => {
+            console.error("Proxy hatası:", e.message);
             res.writeHead(500);
-            res.end(`Proxy error: ${e.message}`);
+            res.end(`Proxy hatası: ${e.message}`);
         });
 
+        // Yanıtı kontrol et (403 gibi durumlar için)
+        proxy.on("response", (r) => {
+            if (r.statusCode === 403) {
+                console.log("403 Forbidden alındı, yanıt:", r.headers);
+                res.writeHead(403);
+                res.end("Sunucu erişimi engelledi (403 Forbidden)");
+            }
+        });
+
+        // İsteği proxy'e yönlendir
         req.pipe(proxy, { end: true });
     } catch (e) {
+        console.error("İstek hatası:", e.message);
         res.writeHead(500);
-        res.end(`Request failed: ${e.message}`);
+        res.end(`İstek başarısız: ${e.message}`);
     }
+}export async function proxyM3U8(url: string, headers: any, res: http.ServerResponse) {
+    const browserHeaders = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "application/vnd.apple.mpegurl,application/x-mpegURL,text/plain,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.5",
+        "Accept-Encoding": "gzip, deflate, br",
+        "Connection": "keep-alive",
+        "Referer": new URL(url).origin + "/",
+        "Cookie": cookieStore.get(new URL(url).hostname) || "",
+        "DNT": "1",
+        "Upgrade-Insecure-Requests": "1",
+        ...headers,
+    };
+
+    const req = await axios(url, {
+        headers: browserHeaders,
+        responseType: "text",
+    }).catch((err) => {
+        console.error("M3U8 isteği hatası:", err.message);
+        res.writeHead(500);
+        res.end(`M3U8 alınamadı: ${err.message}`);
+        return null;
+    });
+
+    if (!req) return;
+
+    // Çerezleri sakla
+    const cookies = req.headers["set-cookie"];
+    if (cookies) {
+        cookieStore.set(new URL(url).hostname, cookies.join("; "));
+        console.log("M3U8 çerezleri kaydedildi:", cookies);
+    }
+
+    // Geri kalan kod aynı kalabilir, sadece browserHeaders'ı proxy URL'lerine geçir
+    const m3u8 = req.data;
+    const baseUrl = new URL(url).origin + new URL(url).pathname.split("/").slice(0, -1).join("/");
+    const lines = m3u8.split("\n");
+    const newLines = [];
+
+    for (const line of lines) {
+        if (line.startsWith("#")) {
+            if (line.startsWith("#EXT-X-KEY:")) {
+                const regex = /https?:\/\/[^\""\s]+/g;
+                const keyUrl = regex.exec(line)?.[0];
+                if (keyUrl) {
+                    const proxyKeyUrl = `${web_server_url}/ts-proxy?url=${encodeURIComponent(keyUrl)}&headers=${encodeURIComponent(JSON.stringify(browserHeaders))}`;
+                    newLines.push(line.replace(regex, proxyKeyUrl));
+                } else {
+                    newLines.push(line);
+                }
+            } else if (line.startsWith("#EXT-X-I-FRAME-STREAM-INF:")) {
+                const uriMatch = line.match(/URI="([^"]+)"/);
+                if (uriMatch) {
+                    const uri = uriMatch[1];
+                    const fullUri = uri.startsWith("http") ? uri : `${baseUrl}/${uri}`;
+                    const proxyUri = `${web_server_url}/m3u8-proxy?url=${encodeURIComponent(fullUri)}&headers=${encodeURIComponent(JSON.stringify(browserHeaders))}`;
+                    newLines.push(line.replace(uri, proxyUri));
+                } else {
+                    newLines.push(line);
+                }
+            } else {
+                newLines.push(line);
+            }
+        } else if (line.trim()) {
+            const uri = new URL(line, url).href;
+            if (uri.endsWith(".m3u8")) {
+                newLines.push(`${web_server_url}/m3u8-proxy?url=${encodeURIComponent(uri)}&headers=${encodeURIComponent(JSON.stringify(browserHeaders))}`);
+            } else {
+                newLines.push(`${web_server_url}/ts-proxy?url=${encodeURIComponent(uri)}&headers=${encodeURIComponent(JSON.stringify(browserHeaders))}`);
+            }
+        } else {
+            newLines.push(line);
+        }
+    }
+
+    res.setHeader("Content-Type", "application/vnd.apple.mpegurl");
+    res.setHeader("Access-Control-Allow-Origin", "*");
+    res.setHeader("Access-Control-Allow-Headers", "*");
+    res.setHeader("Access-Control-Allow-Methods", "*");
+    res.end(newLines.join("\n"));
 }
