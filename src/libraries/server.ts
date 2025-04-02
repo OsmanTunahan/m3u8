@@ -635,15 +635,19 @@ export async function proxyTs(url: string, headers: any, req, res: http.ServerRe
     const uri = new URL(url);
     const isHttps = url.startsWith("https://");
 
-    // Define a realistic set of browser-like headers
+    // Generate a random User-Agent
+    const userAgent = randomUserAgent.getRandom((ua) => {
+        return ua.browserName === "Chrome" || ua.browserName === "Firefox" || ua.browserName === "Safari";
+    }) || "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
+
     const browserHeaders = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "User-Agent": userAgent,
         "Accept": "video/webm,video/ogg,video/*;q=0.9,application/ogg;q=0.7,audio/*;q=0.6,*/*;q=0.5",
         "Accept-Language": "en-US,en;q=0.5",
         "Accept-Encoding": "gzip, deflate, br",
         "Connection": "keep-alive",
-        "Referer": uri.origin, // Mimic a referer from the same origin
-        ...headers, // Merge with user-provided headers
+        "Referer": uri.origin,
+        ...headers,
     };
 
     const options = {
@@ -660,7 +664,7 @@ export async function proxyTs(url: string, headers: any, req, res: http.ServerRe
                   r.headers["content-type"] = "video/mp2t";
                   res.writeHead(r.statusCode ?? 200, {
                       ...r.headers,
-                      "Access-Control-Allow-Origin": "*", // Keep CORS headers
+                      "Access-Control-Allow-Origin": "*",
                   });
                   r.pipe(res, { end: true });
               })
@@ -673,13 +677,11 @@ export async function proxyTs(url: string, headers: any, req, res: http.ServerRe
                   r.pipe(res, { end: true });
               });
 
-        // Handle errors
         proxy.on("error", (e) => {
             res.writeHead(500);
             res.end(`Proxy error: ${e.message}`);
         });
 
-        // Pipe the client request to the proxy
         req.pipe(proxy, { end: true });
     } catch (e) {
         res.writeHead(500);
